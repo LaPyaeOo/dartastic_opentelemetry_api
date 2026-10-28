@@ -17,9 +17,10 @@ Fixes #
      CHANGELOG. CHANGELOG.md records changes for app developers and should
      stay brief. Add entries under the topmost ## [X.Y.Z-wip] section.
      Skip the entry for internal-only work, such as tests or refactors, when
-     appropriate. Never skip it for a breaking change. Use the standard
+     appropriate. Link the PR, not the issue, e.g. ([#123](https://github.com/MindfulSoftwareLLC/dartastic_opentelemetry_api/pull/123)), so entries show up on pub.dev.
+     Never skip it for a breaking change. Use the standard
      ### Changed or ### Removed heading and prefix the bullet with
-     **BREAKING**: when a public API change is breaking.
+     `**BREAKING**: `. Breaking means any change to public API: a signature, a name, a default, a removed member, or an exported type, even when it seems minor.
 
      Documentation. Say what you added or updated, and where.
 
