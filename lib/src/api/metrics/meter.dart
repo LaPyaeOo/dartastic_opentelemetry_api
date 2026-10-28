@@ -2,22 +2,36 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import 'package:meta/meta.dart';
+
+import '../../util/otel_error_handler.dart';
 import '../common/attributes.dart';
+import 'batch_callback.dart';
 import 'counter.dart';
 import 'gauge.dart';
 import 'histogram.dart';
+import 'instrument_advisory.dart';
 import 'observable_callback.dart';
 import 'observable_counter.dart';
 import 'observable_gauge.dart';
+import 'observable_instrument.dart';
 import 'observable_up_down_counter.dart';
 import 'up_down_counter.dart';
 
 part 'meter_create.dart';
 
-/// Meter is responsible for creating [Instrument]s and recording metrics.
+/// Meter is responsible for creating [APIInstrument]s and recording metrics.
 /// The API prefix indicates that it's part of the API and not the SDK
 /// and generally should not be used since an API without an SDK is a noop.
 /// Use the Meter from the SDK instead.
+/// This is the no-op meter. It accepts every argument unvalidated, including
+/// an empty instrument name, and never logs or reports: metrics/noop.md says
+/// the Meter MUST NOT return a non-empty error or log any message. Name
+/// validation belongs to the SDK meter.
+///
+/// All methods of this class are safe for concurrent use by default:
+/// implementations must remain correct when methods are invoked from
+/// interleaved asynchronous tasks within an isolate. See
+/// [Metrics API, concurrency requirements](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#concurrency-requirements).
 class APIMeter {
   /// Gets the name of the meter, usually of a library, package or module
   final String name;
@@ -32,7 +46,7 @@ class APIMeter {
   final Attributes? attributes;
 
   /// Creates a new [APIMeter].
-  /// You cannot create a Meter directly; you must use [MeterProvider]:
+  /// You cannot create a Meter directly; you must use [APIMeterProvider]:
   /// ```dart
   /// var meter = OTel.meterProvider() or more likely, OTel.meterProvider().getMeter("my-library");
   /// ```
@@ -51,60 +65,71 @@ class APIMeter {
   /// SDK subclasses override this to compute the real, current value.
   bool isEnabled() => false;
 
-  /// Creates a [Counter] with the given name.
+  /// Creates a [APICounter] with the given name.
   ///
   /// A Counter is a synchronous Instrument which supports non-negative increments.
   ///
-  /// [name] The name of the instrument
+  /// [name] The name of the instrument. It must conform to the instrument
+  /// name syntax: not empty, first character an ASCII letter, the rest
+  /// letters, digits, `_`, `.`, `-` or `/`, at most 255 characters, and
+  /// compared case-insensitively. This API does not validate it; the SDK
+  /// meter does. See
+  /// [Instrument name syntax](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#instrument-name-syntax).
   /// [unit] Optional unit of the instrument (e.g., "ms" for milliseconds)
   /// [description] Optional description of the instrument
   APICounter<T> createCounter<T extends num>({
     required String name,
     String? unit,
     String? description,
+    InstrumentAdvisory? advisory,
   }) {
-    if (name.isEmpty) {
-      throw ArgumentError('Counter name must not be empty');
-    }
-
     return CounterCreate.create<T>(
       name: name,
       unit: unit,
       description: description,
       meter: this,
+      advisory: advisory,
     );
   }
 
-  /// Creates an [UpDownCounter] with the given name.
+  /// Creates a [APIUpDownCounter] with the given name.
   ///
   /// An UpDownCounter is a synchronous Instrument which supports increments and decrements.
   ///
-  /// [name] The name of the instrument
+  /// [name] The name of the instrument. It must conform to the instrument
+  /// name syntax: not empty, first character an ASCII letter, the rest
+  /// letters, digits, `_`, `.`, `-` or `/`, at most 255 characters, and
+  /// compared case-insensitively. This API does not validate it; the SDK
+  /// meter does. See
+  /// [Instrument name syntax](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#instrument-name-syntax).
   /// [unit] Optional unit of the instrument (e.g., "ms" for milliseconds)
   /// [description] Optional description of the instrument
   APIUpDownCounter<T> createUpDownCounter<T extends num>({
     required String name,
     String? unit,
     String? description,
+    InstrumentAdvisory? advisory,
   }) {
-    if (name.isEmpty) {
-      throw ArgumentError('UpDownCounter name must not be empty');
-    }
-
     return UpDownCounterCreate.create<T>(
       name: name,
       unit: unit,
       description: description,
       meter: this,
+      advisory: advisory,
     );
   }
 
-  /// Creates a [Histogram] with the given name.
+  /// Creates a [APIHistogram] with the given name.
   ///
   /// A Histogram is a synchronous Instrument which can be used to report arbitrary values
   /// that are likely to be statistically meaningful.
   ///
-  /// [name] The name of the instrument
+  /// [name] The name of the instrument. It must conform to the instrument
+  /// name syntax: not empty, first character an ASCII letter, the rest
+  /// letters, digits, `_`, `.`, `-` or `/`, at most 255 characters, and
+  /// compared case-insensitively. This API does not validate it; the SDK
+  /// meter does. See
+  /// [Instrument name syntax](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#instrument-name-syntax).
   /// [unit] Optional unit of the instrument (e.g., "ms" for milliseconds)
   /// [description] Optional description of the instrument
   /// [boundaries] Optional explicit bucket boundaries for the histogram
@@ -112,52 +137,69 @@ class APIMeter {
     required String name,
     String? unit,
     String? description,
+    @Deprecated(
+        'Use advisory: InstrumentAdvisory(explicitBucketBoundaries: ...) instead')
     List<double>? boundaries,
+    InstrumentAdvisory? advisory,
   }) {
-    if (name.isEmpty) {
-      throw ArgumentError('Histogram name must not be empty');
-    }
+    // The deprecated boundaries parameter wins over
+    // advisory.explicitBucketBoundaries, so existing callers keep their
+    // buckets. Everything else on the advisory is kept.
+    final effectiveAdvisory = boundaries != null
+        ? InstrumentAdvisory(
+            explicitBucketBoundaries: boundaries,
+            attributeKeys: advisory?.attributeKeys,
+          )
+        : advisory;
 
     return HistogramCreate.create<T>(
       name: name,
       unit: unit,
       description: description,
       meter: this,
-      boundaries: boundaries,
+      advisory: effectiveAdvisory,
     );
   }
 
-  /// Creates a [Gauge] with the given name.
+  /// Creates a [APIGauge] with the given name.
   ///
   /// A Gauge is a synchronous Instrument which can be used to record non-additive value(s)
   /// when changes occur.
   ///
-  /// [name] The name of the instrument
+  /// [name] The name of the instrument. It must conform to the instrument
+  /// name syntax: not empty, first character an ASCII letter, the rest
+  /// letters, digits, `_`, `.`, `-` or `/`, at most 255 characters, and
+  /// compared case-insensitively. This API does not validate it; the SDK
+  /// meter does. See
+  /// [Instrument name syntax](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#instrument-name-syntax).
   /// [unit] Optional unit of the instrument (e.g., "ms" for milliseconds)
   /// [description] Optional description of the instrument
   APIGauge<T> createGauge<T extends num>({
     required String name,
     String? unit,
     String? description,
+    InstrumentAdvisory? advisory,
   }) {
-    if (name.isEmpty) {
-      throw ArgumentError('Gauge name must not be empty');
-    }
-
     return GaugeCreate.create<T>(
       name: name,
       unit: unit,
       description: description,
       meter: this,
+      advisory: advisory,
     );
   }
 
-  /// Creates an [ObservableCounter] with the given name.
+  /// Creates a [APIObservableCounter] with the given name.
   ///
   /// An ObservableCounter is an asynchronous Instrument which reports monotonically increasing
   /// value(s) when the instrument is being observed.
   ///
-  /// [name] The name of the instrument
+  /// [name] The name of the instrument. It must conform to the instrument
+  /// name syntax: not empty, first character an ASCII letter, the rest
+  /// letters, digits, `_`, `.`, `-` or `/`, at most 255 characters, and
+  /// compared case-insensitively. This API does not validate it; the SDK
+  /// meter does. See
+  /// [Instrument name syntax](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#instrument-name-syntax).
   /// [unit] Optional unit of the instrument (e.g., "ms" for milliseconds)
   /// [description] Optional description of the instrument
   /// [callback] Optional callback to provide measurements when the instrument is observed
@@ -165,27 +207,33 @@ class APIMeter {
     required String name,
     String? unit,
     String? description,
-    ObservableCallback<T>? callback,
+    InstrumentAdvisory? advisory,
+    List<ObservableCallback<T>> callbacks = const [],
+    @Deprecated('Use callbacks instead') ObservableCallback<T>? callback,
   }) {
-    if (name.isEmpty) {
-      throw ArgumentError('ObservableCounter name must not be empty');
-    }
+    final merged = [if (callback != null) callback, ...callbacks];
 
     return ObservableCounterCreate.create<T>(
       name: name,
       unit: unit,
       description: description,
       meter: this,
-      callback: callback,
+      advisory: advisory,
+      callbacks: merged,
     );
   }
 
-  /// Creates an [ObservableUpDownCounter] with the given name.
+  /// Creates a [APIObservableUpDownCounter] with the given name.
   ///
   /// An ObservableUpDownCounter is an asynchronous Instrument which reports values that increase
   /// or decrease when the instrument is being observed.
   ///
-  /// [name] The name of the instrument
+  /// [name] The name of the instrument. It must conform to the instrument
+  /// name syntax: not empty, first character an ASCII letter, the rest
+  /// letters, digits, `_`, `.`, `-` or `/`, at most 255 characters, and
+  /// compared case-insensitively. This API does not validate it; the SDK
+  /// meter does. See
+  /// [Instrument name syntax](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#instrument-name-syntax).
   /// [unit] Optional unit of the instrument (e.g., "ms" for milliseconds)
   /// [description] Optional description of the instrument
   /// [callback] Optional callback to provide measurements when the instrument is observed
@@ -193,27 +241,33 @@ class APIMeter {
     required String name,
     String? unit,
     String? description,
-    ObservableCallback<T>? callback,
+    InstrumentAdvisory? advisory,
+    List<ObservableCallback<T>> callbacks = const [],
+    @Deprecated('Use callbacks instead') ObservableCallback<T>? callback,
   }) {
-    if (name.isEmpty) {
-      throw ArgumentError('ObservableUpDownCounter name must not be empty');
-    }
+    final merged = [if (callback != null) callback, ...callbacks];
 
     return ObservableUpDownCounterCreate.create<T>(
       name: name,
       unit: unit,
       description: description,
       meter: this,
-      callback: callback,
+      advisory: advisory,
+      callbacks: merged,
     );
   }
 
-  /// Creates an [ObservableGauge] with the given name.
+  /// Creates a [APIObservableGauge] with the given name.
   ///
   /// An ObservableGauge is an asynchronous Instrument which reports non-additive value(s)
   /// when the instrument is being observed.
   ///
-  /// [name] The name of the instrument
+  /// [name] The name of the instrument. It must conform to the instrument
+  /// name syntax: not empty, first character an ASCII letter, the rest
+  /// letters, digits, `_`, `.`, `-` or `/`, at most 255 characters, and
+  /// compared case-insensitively. This API does not validate it; the SDK
+  /// meter does. See
+  /// [Instrument name syntax](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#instrument-name-syntax).
   /// [unit] Optional unit of the instrument (e.g., "ms" for milliseconds)
   /// [description] Optional description of the instrument
   /// [callback] Optional callback to provide measurements when the instrument is observed
@@ -221,19 +275,42 @@ class APIMeter {
     required String name,
     String? unit,
     String? description,
-    ObservableCallback<T>? callback,
+    InstrumentAdvisory? advisory,
+    List<ObservableCallback<T>> callbacks = const [],
+    @Deprecated('Use callbacks instead') ObservableCallback<T>? callback,
   }) {
-    if (name.isEmpty) {
-      throw ArgumentError('ObservableGauge name must not be empty');
-    }
+    final merged = [if (callback != null) callback, ...callbacks];
 
     return ObservableGaugeCreate.create<T>(
       name: name,
       unit: unit,
       description: description,
       meter: this,
-      callback: callback,
+      advisory: advisory,
+      callbacks: merged,
     );
+  }
+
+  /// Registers a batch callback for multiple observable instruments.
+  APIBatchCallbackRegistration registerBatchCallback(
+    BatchObservableCallback callback,
+    Set<APIObservableInstrument> instruments,
+  ) {
+    // metrics/api.md: a multiple-instrument callback MUST be associated
+    // with instruments from the same Meter. The type already rules out a
+    // synchronous instrument; a foreign meter is reported and the callback
+    // is not registered. error-handling.md: never throw at the user.
+    for (final instrument in instruments) {
+      if (!identical(instrument.meter, this)) {
+        OTelErrorHandling.report(ArgumentError(
+          'registerBatchCallback: instrument "${instrument.name}" belongs '
+          'to a different Meter; the callback was not registered.',
+        ));
+        return _NoopBatchCallbackRegistration();
+      }
+    }
+    // No-op: return a stateless registration
+    return _NoopBatchCallbackRegistration();
   }
 
   @override
@@ -252,4 +329,9 @@ class APIMeter {
       version.hashCode ^
       schemaUrl.hashCode ^
       attributes.hashCode;
+}
+
+class _NoopBatchCallbackRegistration implements APIBatchCallbackRegistration {
+  @override
+  void unregister() {}
 }

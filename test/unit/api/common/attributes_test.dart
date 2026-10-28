@@ -1,10 +1,13 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import 'dart:convert';
+
 import 'package:dartastic_opentelemetry_api/dartastic_opentelemetry_api.dart';
 import 'package:test/test.dart';
 
 void main() {
+  _emptyKeyTests();
   group('Attributes', () {
     late Attributes attributes;
 
@@ -346,15 +349,24 @@ void main() {
       expect(attrs.isEmpty, isFalse);
     });
 
-    test('_getTyped throws StateError for wrong type', () {
+    test('typed getters return null for wrong type and report the mismatch',
+        () {
+      // error-handling.md: API methods MUST NOT throw unhandled
+      // exceptions when used incorrectly by end users.
+      final reported = <Object>[];
+      OTelErrorHandling.handler = (error, stackTrace) => reported.add(error);
+      addTearDown(OTelErrorHandling.resetToDefault);
+
       final attrs = OTelAPI.attributes([
         OTelAPI.attributeString('key', 'value'),
       ]);
 
-      expect(
-        () => attrs.getInt('key'),
-        throwsA(isA<StateError>()),
-      );
+      expect(attrs.getInt('key'), isNull);
+      expect(reported, hasLength(1));
+      expect(reported.single, isA<StateError>());
+      // The stored value is still readable with the right type.
+      expect(attrs.getString('key'), equals('value'));
+      expect(reported, hasLength(1));
     });
 
     test('get methods return null for missing key', () {
@@ -481,12 +493,44 @@ void main() {
       expect(attrs.getDoubleList('key'), equals([1.0, 2.5, 3.0]));
     });
 
-    test('fromJson ignores empty list with warning', () {
+    test('fromJson stores empty list per OTel spec', () {
       final json = <String, dynamic>{'key': <dynamic>[]};
       final attrs = Attributes.fromJson(json);
 
-      // Empty lists are ignored per OTel spec
-      expect(attrs.isEmpty, isTrue);
+      // Empty lists are stored per the OTel spec: they are meaningful values.
+      expect(attrs.isEmpty, isFalse);
+      expect(attrs.getStringList('key'), equals(<String>[]));
+    });
+
+    test('fromJson round-trips empty string and empty list', () {
+      final json = <String, dynamic>{
+        'emptyStr': '',
+        'emptyList': <String>[],
+      };
+      final attrs = Attributes.fromJson(json);
+
+      expect(attrs.getString('emptyStr'), equals(''));
+      expect(attrs.getStringList('emptyList'), equals(<String>[]));
+
+      final decoded =
+          jsonDecode(jsonEncode(attrs.toJson())) as Map<String, dynamic>;
+      final roundTripped = Attributes.fromJson(decoded);
+      expect(roundTripped.getString('emptyStr'), equals(''));
+      expect(roundTripped.getStringList('emptyList'), equals(<String>[]));
+    });
+
+    test('empty typed list loses element type through real JSON round-trip',
+        () {
+      final attrs = Attributes.of({'k': <int>[]});
+      expect(attrs.getIntList('k'), equals(<int>[]));
+
+      final decoded =
+          jsonDecode(jsonEncode(attrs.toJson())) as Map<String, dynamic>;
+      final roundTripped = Attributes.fromJson(decoded);
+
+      // JSON has no element-type information, so the empty list comes back
+      // as List<dynamic> and falls through to the List<String> fallback.
+      expect(roundTripped.getStringList('k'), equals(<String>[]));
     });
 
     test('fromJson ignores unsupported list types with warning', () {
@@ -551,6 +595,49 @@ void main() {
       final attrs = map.toAttributes();
 
       expect(attrs.getString('key'), equals('value'));
+    });
+  });
+}
+
+void _emptyKeyTests() {
+  group('empty attribute keys are dropped and reported', () {
+    late List<Object> reported;
+    setUp(() {
+      OTelAPI.initialize(
+          endpoint: 'http://localhost:4317',
+          serviceName: 'x',
+          serviceVersion: '1');
+      reported = <Object>[];
+      OTelAPI.setErrorHandler((e, _) => reported.add(e));
+    });
+    tearDown(() => OTelAPI.setErrorHandler(null));
+
+    test('Attributes.of drops an empty key and keeps the rest', () {
+      final attrs = Attributes.of({'': 'gone', 'kept': 'v'});
+      expect(attrs.keys, equals(['kept']));
+      expect(reported, hasLength(1));
+      expect(reported.single, isA<ArgumentError>());
+    });
+
+    test(
+        'a factory-built attribute with an empty key never enters a collection',
+        () {
+      final bad = OTelAPI.attributeString('', 'v');
+      final good = OTelAPI.attributeString('k', 'v');
+      final attrs = OTelAPI.attributesFromList([bad, good]);
+      expect(attrs.keys, equals(['k']));
+      expect(reported, hasLength(1));
+    });
+
+    test('fromJson drops an empty key', () {
+      final attrs = Attributes.fromJson({'': 'gone', 'kept': 1});
+      expect(attrs.keys, equals(['kept']));
+      expect(reported, hasLength(1));
+    });
+
+    test('nothing is reported when every key is non-empty', () {
+      Attributes.of({'a': 1, 'b': 'two'});
+      expect(reported, isEmpty);
     });
   });
 }

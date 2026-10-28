@@ -3,6 +3,7 @@
 
 import 'package:meta/meta.dart';
 import '../common/attributes.dart';
+import 'instrument_advisory.dart';
 import 'meter.dart';
 
 part 'counter_create.dart';
@@ -11,6 +12,11 @@ part 'counter_create.dart';
 ///
 /// See the OpenTelemetry specification for more details:
 /// https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#counter
+///
+/// All methods of this class are safe for concurrent use by default:
+/// implementations must remain correct when methods are invoked from
+/// interleaved asynchronous tasks within an isolate. See
+/// [Metrics API, concurrency requirements](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#concurrency-requirements).
 class APICounter<T extends num> {
   /// The name of this counter instrument.
   final String _name;
@@ -24,6 +30,9 @@ class APICounter<T extends num> {
   /// The meter that created this counter instrument.
   final APIMeter _meter;
 
+  /// The optional advisory parameters for this counter instrument.
+  final InstrumentAdvisory? _advisory;
+
   /// Creates a new [APICounter] instrument.
   ///
   /// This constructor is typically not called directly. Instead, use [APIMeter.createCounter].
@@ -32,12 +41,9 @@ class APICounter<T extends num> {
   /// [_description] Optional description of the counter instrument.
   /// [_unit] Optional unit of measurement for the counter.
   /// [_meter] The meter that created this counter instrument.
-  APICounter(
-    this._name,
-    this._description,
-    this._unit,
-    this._meter,
-  );
+  /// [_advisory] Optional advisory parameters for the counter.
+  APICounter(this._name, this._description, this._unit, this._meter,
+      [this._advisory]);
 
   /// Returns the name of this Counter.
   String get name => _name;
@@ -58,6 +64,9 @@ class APICounter<T extends num> {
 
   /// Returns the meter that created this counter.
   APIMeter get meter => _meter;
+
+  /// Returns the advisory parameters of this Counter.
+  InstrumentAdvisory? get advisory => _advisory;
 
   /// Adds a value to the counter's sum.
   ///

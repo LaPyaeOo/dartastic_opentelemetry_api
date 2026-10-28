@@ -4,6 +4,7 @@
 import 'package:meta/meta.dart';
 import '../../factory/otel_factory.dart';
 import '../../util/default_time_provider.dart';
+import '../../util/otel_error_handler.dart';
 import '../../util/time_provider.dart';
 import '../common/attributes.dart';
 import '../common/instrumentation_scope.dart';
@@ -15,6 +16,7 @@ import 'span_kind.dart';
 import 'span_link.dart';
 
 part 'non_recording_span.dart';
+part 'readable_span.dart';
 part 'span_create.dart';
 
 /// The set of canonical status codes.
@@ -61,6 +63,7 @@ class APISpan {
   List<SpanLink>? _spanLinks;
   SpanStatusCode? _spanStatusCode;
   String? _statusDescription;
+  final bool _isRecordingAtCreation;
 
   APISpan._({
     required String name,
@@ -73,6 +76,7 @@ class APISpan {
     List<SpanLink>? spanLinks,
     DateTime? startTime,
     TimeProvider? timeProvider,
+    required bool isRecording,
   })  : _name = name,
         _instrumentationScope = instrumentationScope,
         _spanContext = spanContext,
@@ -83,7 +87,8 @@ class APISpan {
         _startTime =
             startTime ?? (timeProvider ?? defaultTimeProvider).nowDateTime(),
         _spanLinks = spanLinks,
-        _spanEvents = spanEvents {
+        _spanEvents = spanEvents,
+        _isRecordingAtCreation = isRecording {
     // Set initial status to unset per spec
     _spanStatusCode = SpanStatusCode.Unset;
 
@@ -119,13 +124,7 @@ class APISpan {
   /// Whether mutating operations currently apply. The default is
   /// "until the span ends"; [NonRecordingSpan] overrides this to make
   /// every mutation a no-op, per the spec.
-  bool get _modifiable => !isEnded;
-
-  /// The status of this [APISpan].
-  SpanStatusCode get status => _spanStatusCode ?? SpanStatusCode.Unset;
-
-  /// The status of this [APISpan].
-  String? get statusDescription => _statusDescription;
+  bool get _modifiable => _isRecordingAtCreation && !isEnded;
 
   /// Returns the SpanContext associated with this Span, if any.
   /// Root spans have no SpanContext.
@@ -146,22 +145,13 @@ class APISpan {
   /// Returns the SpanKind of this Span.
   SpanKind get kind => _spankind;
 
-  /// Returns an unmodifiable List of SpanEvents associated with this Span.
-  List<SpanEvent>? get spanEvents =>
-      _spanEvents == null ? null : List.unmodifiable(_spanEvents!);
-
-  /// Returns the SpanLinks associated with this Span.
-  List<SpanLink>? get spanLinks =>
-      _spanLinks == null ? null : List.unmodifiable(_spanLinks!);
+  /// Read access to what this span recorded is deliberately not here.
+  /// trace/api.md says implementations SHOULD NOT provide access to a Span's
+  /// attributes besides its SpanContext. An SDK reads them through
+  /// [getReadableSpan], which is not exported from the package barrel.
 
   /// Returns true if this Span is recording information like events, attributes, status, etc.
-  bool get isRecording => !isEnded;
-
-  /// Only exposed for testing.  Spans are not meant to be used to propagate
-  /// information within a process. To prevent misuse, implementations
-  /// SHOULD NOT provide access to a Span's attributes besides its SpanContext
-  @visibleForTesting
-  Attributes get attributes => _attributes;
+  bool get isRecording => _isRecordingAtCreation && !isEnded;
 
   /// Sets the attributes, replacing all existing attributes since
   /// implementations SHOULD NOT provide access to a Span's attributes
@@ -282,7 +272,7 @@ class APISpan {
   /// "standard event names and keys" which have prescribed semantic meanings.
   /// See https://github.com/open-telemetry/semantic-conventions/blob/main/docs/README.md
   void addEvent(SpanEvent spanEvent) {
-    if (_modifiable) {
+    if (_modifiable && !_hasEmptyName(spanEvent.name)) {
       _spanEvents ??= [];
       _spanEvents!.add(spanEvent);
     }
@@ -293,7 +283,7 @@ class APISpan {
     if (OTelFactory.otelFactory == null) {
       throw StateError('Call initialize() first.');
     }
-    if (_modifiable) {
+    if (_modifiable && !_hasEmptyName(name)) {
       _spanEvents ??= [];
       // Source the event timestamp from this span's TimeProvider so events
       // share the same clock as start/end. Bypasses the static
@@ -312,15 +302,39 @@ class APISpan {
     }
     if (_modifiable) {
       _spanEvents ??= [];
-      spanEvents.forEach((name, attributes) => _spanEvents!.add(OTelFactory
-          .otelFactory!
-          .spanEvent(name, attributes, _timeProvider.nowDateTime())));
+      spanEvents.forEach((name, attributes) {
+        if (_hasEmptyName(name)) return;
+        _spanEvents!.add(OTelFactory.otelFactory!
+            .spanEvent(name, attributes, _timeProvider.nowDateTime()));
+      });
     }
   }
 
+  /// Reports an empty event name and answers `true` when the caller must
+  /// drop the event.
+  ///
+  /// error-handling.md forbids a throw here, so an empty name drops the
+  /// event and goes to the error handler. The caller does this test before
+  /// it makes the event, because a dropped event must not be allocated.
+  /// See https://opentelemetry.io/docs/specs/otel/error-handling/#basic-error-handling-principles
+  bool _hasEmptyName(String name) {
+    if (name.isNotEmpty) return false;
+    OTelErrorHandling.report(
+        ArgumentError('Span event names must be non-empty; event ignored.'));
+    return true;
+  }
+
   /// Adds a link to this Span.
-  /// Ignored if the span is ended.
-  /// [spanContext] the span context for the span
+  ///
+  /// For a context that is available at span creation, the `links` parameter
+  /// of [APITracer.startSpan] and [APITracer.createSpan] is preferred to this
+  /// method. A head sampling decision can only use the information that is
+  /// present at span creation.
+  ///
+  /// If the span is ended, this method does nothing.
+  ///
+  /// [spanContext] The context of the span to link to.
+  /// [attributes] Optional attributes that describe the link.
   void addLink(SpanContext spanContext, [Attributes? attributes]) {
     if (OTelFactory.otelFactory == null) {
       throw StateError('Call initialize() first.');
@@ -333,7 +347,15 @@ class APISpan {
   }
 
   /// Adds a link to this Span.
-  /// Ignored if the span is ended.
+  ///
+  /// For a context that is available at span creation, the `links` parameter
+  /// of [APITracer.startSpan] and [APITracer.createSpan] is preferred to this
+  /// method. A head sampling decision can only use the information that is
+  /// present at span creation.
+  ///
+  /// If the span is ended, this method does nothing.
+  ///
+  /// [spanLink] The link to add to this span.
   void addSpanLink(SpanLink spanLink) {
     if (_modifiable) {
       _spanLinks ??= [];

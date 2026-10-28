@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import 'package:meta/meta.dart';
+
+import 'instrument_advisory.dart';
 import 'measurement.dart';
 import 'meter.dart';
 import 'observable_callback.dart';
+import 'observable_instrument.dart';
 
 part 'observable_gauge_create.dart';
 
@@ -14,22 +17,29 @@ part 'observable_gauge_create.dart';
 /// An ObservableGauge is intended for capturing values that are not meant to be combined
 /// across multiple entities, such as the current temperature, CPU usage percentage, or
 /// room occupancy.
-class APIObservableGauge<T extends num> {
+///
+/// All methods of this class are safe for concurrent use by default:
+/// implementations must remain correct when methods are invoked from
+/// interleaved asynchronous tasks within an isolate. See
+/// [Metrics API, concurrency requirements](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.60.0/specification/metrics/api.md#concurrency-requirements).
+class APIObservableGauge<T extends num> implements APIObservableInstrument {
   final String _name;
   final String? _description;
   final String? _unit;
   final APIMeter _meter;
+  final InstrumentAdvisory? _advisory;
   final List<ObservableCallback<T>> _callbacks = [];
 
   /// Creates a new observable gauge instrument
   APIObservableGauge(this._name, this._description, this._unit, this._meter,
-      [ObservableCallback<T>? callback]) {
-    if (callback != null) {
-      addCallback(callback);
+      [this._advisory, List<ObservableCallback<T>> callbacks = const []]) {
+    for (final cb in callbacks) {
+      addCallback(cb);
     }
   }
 
   /// Returns the name of this observable gauge.
+  @override
   String get name => _name;
 
   /// Returns the description of this observable gauge.
@@ -37,6 +47,9 @@ class APIObservableGauge<T extends num> {
 
   /// Returns the unit of this observable gauge.
   String? get unit => _unit;
+
+  /// Returns the advisory parameters of this observable gauge.
+  InstrumentAdvisory? get advisory => _advisory;
 
   /// Returns whether the instrument is enabled and will record measurements.
   ///
@@ -47,18 +60,27 @@ class APIObservableGauge<T extends num> {
   bool isEnabled() => false;
 
   /// Returns the meter that created this observable gauge.
+  @override
   APIMeter get meter => _meter;
 
   /// Returns the current list of callbacks registered to this instrument.
   List<ObservableCallback<T>> get callbacks => List.unmodifiable(_callbacks);
 
   /// Registers a callback function that will be invoked when the instrument is observed.
+  /// Returns a registration handle that can be used to unregister the callback.
+  ///
+  /// This method returns a handle for idiomatic registration management, while
+  /// [removeCallback] is provided for direct reference-based removal (since
+  /// single-instrument callbacks are tightly coupled and simple enough to not strictly require a handle).
   APICallbackRegistration<T> addCallback(ObservableCallback<T> callback) {
     _callbacks.add(callback);
     return _CallbackRegistration(this, callback);
   }
 
-  /// Removes a callback from this instrument.
+  /// Removes a callback from this instrument by direct reference.
+  ///
+  /// Provided alongside the registration handle returned by [addCallback] because
+  /// single-instrument callbacks are simple enough not to strictly require a handle object.
   void removeCallback(ObservableCallback<T> callback) {
     _callbacks.remove(callback);
   }

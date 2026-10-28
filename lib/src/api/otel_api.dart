@@ -45,7 +45,7 @@ import 'trace/tracer_provider.dart';
 /// The [OTelAPI] is the no-op API implementation of OTel, as required by the
 /// specification
 /// This class should only be used in the rare case of running without and SDK
-/// It is provided to comply with the specifiction requirement that the API
+/// It is provided to comply with the specification requirement that the API
 /// can be used without an SDK installed.
 /// The [initialize] method must be called first. Internally it sets the
 /// [OTelFactory] to [OTelAPIFactory].
@@ -78,8 +78,8 @@ class OTelAPI {
   /// the instrumentation library (e.g. @dart/dartastic_opentelemetry_api),
   /// package, module or class name.
   /// [serviceVersion] defaults to the matching OTel spec version
-  /// plus a release version of this library, currently  1.11.0.0
-  /// [otelFactoryCreationFunction] defaults to a function that constructs
+  /// plus a release version of this library, currently 1.11.0.0
+  /// [oTelFactoryCreationFunction] defaults to a function that constructs
   /// the noop OTelAPIFactory as required by the specification. A factory
   /// method is required for serialization across
   /// execution contexts (isolates).
@@ -203,13 +203,13 @@ class OTelAPI {
         attributes: attributes);
   }
 
-  /// returns a list of [APITracerProvider]s including the the global default
+  /// returns a list of [APITracerProvider]s including the global default
   /// and any named providers added.
   static List<APITracerProvider> tracerProviders() {
     return OTelFactory.otelFactory?.getTracerProviders() ?? [];
   }
 
-  /// returns a list of [APIMeterProvider]s including the the global default
+  /// returns a list of [APIMeterProvider]s including the global default
   /// and any named providers added.
   static List<APIMeterProvider> meterProviders() {
     return OTelFactory.otelFactory?.getMeterProviders() ?? [];
@@ -407,7 +407,7 @@ class OTelAPI {
   }
 
   /// Creates an `Baggage` with the given `name` and `keyValuePairs` which
-  /// are converted into `BaggeEntry`s without metadata.
+  /// are converted into `BaggageEntry`s without metadata.
   static Baggage baggageForMap(Map<String, String> keyValuePairs) {
     _getAndCacheOtelFactory();
     return OTelFactory.otelFactory!.baggageForMap(keyValuePairs);
@@ -569,6 +569,7 @@ class OTelAPI {
   /// Creates a TraceFlags object with the specified flags.
   ///
   /// TraceFlags represents options for a trace, such as sampling decision.
+  /// Only the low eight bits of [flags] are retained.
   ///
   /// @param flags Optional integer representing the trace flags, defaults to NONE_FLAG
   /// @return A new TraceFlags instance
@@ -604,21 +605,23 @@ class OTelAPI {
     return OTelFactory.otelFactory!.traceId(traceId);
   }
 
-  /// Creates a new [TraceId] from a hex string
+  /// Creates a new [TraceId] from a hex string.
+  ///
+  /// If the string is malformed or has the wrong length, the error is
+  /// reported to the error handler and an invalid [TraceId] is returned,
+  /// following the OpenTelemetry error-handling spec.
   static TraceId traceIdFrom(String hexString) {
     _getAndCacheOtelFactory();
-    try {
-      final bytes = IdGenerator.hexToBytes(hexString);
-      if (bytes == null || bytes.length != TraceId.traceIdLength) {
-        throw FormatException('TraceId must be {$TraceId.traceIdLength} bytes');
-      }
-      return OTelFactory.otelFactory!.traceId(bytes);
-    } catch (e) {
-      throw FormatException('Invalid TraceId hex string: $hexString, $e');
+    final bytes = IdGenerator.hexToBytes(hexString);
+    if (bytes == null || bytes.length != TraceId.traceIdLength) {
+      OTelErrorHandling.report(
+          FormatException('Invalid TraceId hex string: $hexString'));
+      return traceIdInvalid();
     }
+    return OTelFactory.otelFactory!.traceId(bytes);
   }
 
-  /// Creates an invalid [Trace] (all zeros)
+  /// Creates an invalid [TraceId] (all zeros)
   static TraceId traceIdInvalid() {
     return traceIdOf(TraceId.invalidTraceIdBytes);
   }
@@ -638,21 +641,20 @@ class OTelAPI {
     return OTelFactory.otelFactory!.spanId(spanId);
   }
 
-  /// SpanId from 8-byte String.
+  /// Creates a new [SpanId] from a hex string.
+  ///
+  /// If the string is malformed or has the wrong length, the error is
+  /// reported to the error handler and an invalid [SpanId] is returned,
+  /// following the OpenTelemetry error-handling spec.
   static SpanId spanIdFrom(String hexString) {
     _getAndCacheOtelFactory();
-
-    /// Generate a new random SpanId
-    try {
-      final bytes = IdGenerator.hexToBytes(hexString);
-      if (bytes == null || bytes.length != SpanId.spanIdLength) {
-        throw const FormatException(
-            'SpanId must be ${SpanId.spanIdLength} bytes');
-      }
-      return OTelFactory.otelFactory!.spanId(bytes);
-    } catch (e) {
-      throw FormatException('Invalid SpanId hex string: $hexString,  $e');
+    final bytes = IdGenerator.hexToBytes(hexString);
+    if (bytes == null || bytes.length != SpanId.spanIdLength) {
+      OTelErrorHandling.report(
+          FormatException('Invalid SpanId hex string: $hexString'));
+      return spanIdInvalid();
     }
+    return OTelFactory.otelFactory!.spanId(bytes);
   }
 
   /// Creates an invalid [SpanId] (all zeros)
